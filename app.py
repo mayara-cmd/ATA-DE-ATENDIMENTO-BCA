@@ -37,8 +37,8 @@ MAPA_ACAO_DEPT = {
     "falência":                            "Cível",
 }
 
-COR_TITULO = RGBColor(0x1F, 0x49, 0x7D)
-COR_SUBTIT = RGBColor(0x2E, 0x74, 0xB5)
+COR_TITULO = RGBColor(0x1A, 0x1A, 0x1A)
+COR_SUBTIT = RGBColor(0x44, 0x44, 0x44)
 
 # ─────────────────────────────────────────────────────────────
 # PROCESSAMENTO DO EXCEL
@@ -73,9 +73,10 @@ def carregar_excel(uploaded_file):
         "Número de CNJ":           "cnj",
         "Valor da causa":          "valor",
         "Órgão":                   "orgao",
+        "Data da distribuição":    "data_distribuicao",
         "Departamento":            "dept_col",
     })
-    for col in ["responsavel", "cnj", "valor", "orgao", "dept_col"]:
+    for col in ["responsavel", "cnj", "valor", "orgao", "dept_col", "data_distribuicao"]:
         if col not in df_raw.columns:
             df_raw[col] = ""
 
@@ -106,9 +107,10 @@ def carregar_excel(uploaded_file):
             "partes":    str(primeira["partes"]).strip(),
             "orgao":     str(primeira["orgao"]).strip(),
             "valor":     str(primeira["valor"]).strip(),
-            "historico": historico,
-            "ultimo":    ultimo,
-            "n_and":     len(grupo_real),
+            "historico":          historico,
+            "ultimo":             ultimo,
+            "n_and":              len(grupo_real),
+            "data_distribuicao":  str(primeira["data_distribuicao"]).strip(),
         })
     return pd.DataFrame(casos)
 
@@ -133,40 +135,73 @@ def get_model():
     return genai.GenerativeModel("gemini-1.5-flash")
 
 def resumir_caso(model, caso):
-    prompt = f"""Você é assistente jurídico. Redija o resumo deste caso para ata mensal.
-REGRAS:
-- Máximo 5 linhas
-- Comece com "Atualmente verificamos que..."
-- Termine: "O próximo passo é: **[ação concreta]**."
-- Foque no status atual e próxima ação. Não repita número do processo nem partes.
+    data_dist = caso.get("data_distribuicao", "")
+    data_dist_txt = f"Data de distribuição: {data_dist}" if data_dist and data_dist not in ("", "nan", "NaT") else ""
+    prompt = f"""Você é assessor jurídico redigindo uma ata de atendimento mensal para um escritório de advocacia.
 
-Tipo: {caso['acao']}
+Redija um resumo em UM ÚNICO PARÁGRAFO de até 80 palavras para o caso abaixo.
+
+ESTRUTURA OBRIGATÓRIA DO PARÁGRAFO:
+1. "O caso se refere a [tipo de ação, cliente principal e parte contrária principal]."
+2. {data_dist_txt if data_dist_txt else ""}
+3. "Atualmente verificamos que [status atual claro e objetivo do caso]."
+4. "Deliberação: [deixar em branco]"
+
+REGRAS:
+- Linguagem formal, direta e simples
+- Máximo 80 palavras no total
+- Inclua a data de distribuição se disponível
+- NÃO repita o número da pasta no texto
+- NÃO use bullet points — escreva em parágrafo corrido
+- Use exclusivamente os dados fornecidos abaixo
+
+DADOS DO CASO:
+Pasta: {caso['id_caso']}
+Tipo de ação: {caso['acao']}
 Partes: {caso['partes']}
 Órgão: {caso['orgao']}
-Valor: {caso['valor']}
-Histórico:
+Valor da causa: {caso['valor']}
+{data_dist_txt}
+Histórico de andamentos:
 {caso['historico'][-2500:]}"""
     try:
         return model.generate_content(prompt).text.strip()
     except Exception as e:
-        return f"Atualmente verificamos que {caso['ultimo'][:250]}\n\nO próximo passo é: **verificar andamentos pendentes.**"
+        return f"O caso se refere a {caso['acao']} — {caso['partes'][:100]}. Atualmente verificamos que {caso['ultimo'][:200]}. Deliberação:"
 
 def resumir_grupo(model, ids, df):
     rows = df[df["id_caso"].isin(ids)]
-    difs = "\n".join(
-        f"- {r['id_caso']} ({r['partes'][:50]}): {r['ultimo'][:120]}"
+    casos_txt = "\n".join(
+        f"- Pasta {r['id_caso']} | {r['partes'][:60]} | Dist.: {r.get('data_distribuicao','')} | Último andamento: {r['ultimo'][:150]}"
         for _, r in rows.iterrows()
     )
-    prompt = f"""Você é assistente jurídico. Esses casos são semelhantes — escreva UM parágrafo unificado para a ata.
-REGRAS: destaque o que há de comum, mencione diferenças relevantes, termine com próximo passo em **negrito**. Máx 6 linhas.
+    prompt = f"""Você é assessor jurídico redigindo uma ata de atendimento mensal.
 
-Tipo: {rows.iloc[0]['acao']}
-Casos:
-{difs}"""
+Os casos abaixo são semelhantes (mesma matéria/tese). Redija um bloco agrupado seguindo este formato:
+
+FORMATO OBRIGATÓRIO:
+Título do Grupo: [Números das pastas] — [título que identifique os casos, ex: "Ações PROCON — Auto Posto Emanoel"]
+
+Em seguida, UM PARÁGRAFO de até 100 palavras com:
+- "O grupo se refere a [tipo de ação e tese comum]."
+- "Atualmente verificamos que [status comum a todos os casos]. [Diferenças relevantes entre eles, se houver]."
+- "Deliberação: [deixar em branco]"
+
+REGRAS:
+- NÃO repita informações idênticas caso a caso
+- Linguagem formal, direta e simples
+- Identifique quantas pastas compõem o grupo
+- Use exclusivamente os dados fornecidos
+
+CASOS DO GRUPO:
+Tipo de ação: {rows.iloc[0]['acao']}
+Total de casos: {len(ids)}
+{casos_txt}"""
     try:
         return model.generate_content(prompt).text.strip()
     except:
-        return f"Casos semelhantes ({', '.join(ids)}): {rows.iloc[0]['ultimo'][:200]}"
+        pastas = ", ".join(ids)
+        return f"Grupo ({len(ids)} casos — {pastas}): O grupo se refere a {rows.iloc[0]['acao']}. Atualmente verificamos que {rows.iloc[0]['ultimo'][:200]}. Deliberação:"
 
 # ─────────────────────────────────────────────────────────────
 # GERAÇÃO DO WORD
@@ -183,7 +218,7 @@ def _brd(cell):
     for side in ("top", "left", "bottom", "right"):
         b = OxmlElement(f"w:{side}")
         b.set(qn("w:val"), "single"); b.set(qn("w:sz"), "4")
-        b.set(qn("w:space"), "0"); b.set(qn("w:color"), "BFBFBF")
+        b.set(qn("w:space"), "0"); b.set(qn("w:color"), "C8C8C8")
         tcB.append(b)
     tcPr.append(tcB)
 
@@ -208,7 +243,7 @@ def tabela_casos(doc, linhas):
     t.style = "Table Grid"
     t.alignment = WD_TABLE_ALIGNMENT.LEFT
     for cell, txt in zip(t.rows[0].cells, ["Proc./Serv./Doc.", "Resumo", "Deliberações da reunião"]):
-        _shd(cell, "D6E4F0"); _brd(cell)
+        _shd(cell, "E8E8E8"); _brd(cell)
         run = cell.paragraphs[0].add_run(txt)
         run.bold = True; run.font.size = Pt(9); run.font.color.rgb = COR_TITULO
     for ln in linhas:
@@ -229,7 +264,7 @@ def tabela_vazia(doc, n=3):
     t = doc.add_table(rows=1 + n, cols=2)
     t.style = "Table Grid"
     for cell, txt in zip(t.rows[0].cells, ["Resumo e status", "Deliberações da reunião"]):
-        _shd(cell, "D6E4F0"); _brd(cell)
+        _shd(cell, "E8E8E8"); _brd(cell)
         run = cell.paragraphs[0].add_run(txt)
         run.bold = True; run.font.size = Pt(9); run.font.color.rgb = COR_TITULO
     for row in t.rows[1:]:
