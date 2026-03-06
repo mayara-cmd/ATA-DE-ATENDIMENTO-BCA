@@ -714,7 +714,7 @@ if not arquivo_principal:
     st.caption("Selecione o arquivo para continuar.")
 
 # ── PROCESSAMENTO ─────────────────────────────────────────────
-if gerar and excel1:
+if gerar and arquivo_principal:
     try:
         with st.spinner("Lendo arquivo..."):
             if usar_pdf:
