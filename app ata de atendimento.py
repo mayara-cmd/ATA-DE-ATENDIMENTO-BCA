@@ -63,8 +63,7 @@ def parsear_pdf(uploaded_file):
         if not caso or not caso.get('acao'):
             return
         ands     = caso.get('_ands', [])
-        historico = '
-'.join(f"[{a['data']}] {a['desc']}" for a in ands)
+        historico = '\n'.join(f"[{a['data']}] {a['desc']}" for a in ands)
         ultimo    = ands[0]['desc'] if ands else ''
 
         esc = caso.get('escritorio', '').lower()
