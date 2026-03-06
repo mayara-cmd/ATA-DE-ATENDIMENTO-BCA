@@ -1,4 +1,5 @@
 import re
+import time
 import io
 import base64
 import pandas as pd
@@ -306,16 +307,23 @@ def resumir_caso(model, caso):
         f"ANDAMENTOS (do mais recente ao mais antigo):\n{historico_limpo}"
     )
 
-    try:
-        resp = model.generate_content(prompt)
-        texto = resp.text.strip() if resp and resp.text else ""
-        if not texto:
-            raise ValueError("Resposta vazia da IA")
-        if "Deliberação:" not in texto:
-            texto += " Deliberação:"
-        return texto
-    except Exception as e:
-        return f"[ERRO IA: {type(e).__name__}: {str(e)[:150]}] Ação: {caso.get('acao','')}. Partes: {caso.get('partes','')[:80]}. Deliberação:"
+    for tentativa in range(3):
+        try:
+            resp = model.generate_content(prompt)
+            texto = resp.text.strip() if resp and resp.text else ""
+            if not texto:
+                raise ValueError("Resposta vazia da IA")
+            if "Deliberação:" not in texto:
+                texto += " Deliberação:"
+            return texto
+        except Exception as e:
+            erro = str(e)
+            if "429" in erro or "ResourceExhausted" in erro or "quota" in erro.lower():
+                espera = 15 * (tentativa + 1)
+                time.sleep(espera)
+                continue
+            return f"[ERRO IA: {type(e).__name__}: {erro[:150]}] Ação: {caso.get('acao','')}. Partes: {caso.get('partes','')[:80]}. Deliberação:"
+    return f"[ERRO IA: Quota excedida após 3 tentativas] Ação: {caso.get('acao','')}. Deliberação:"
 
 
 def resumir_grupo(model, ids, df):
@@ -344,16 +352,23 @@ def resumir_grupo(model, ids, df):
         f"CASOS:\n{casos_txt}"
     )
 
-    try:
-        resp = model.generate_content(prompt)
-        texto = resp.text.strip() if resp and resp.text else ""
-        if not texto:
-            raise ValueError("Resposta vazia")
-        if "Deliberação:" not in texto:
-            texto += " Deliberação:"
-        return texto
-    except Exception as e:
-        return f"[ERRO IA: {type(e).__name__}: {str(e)[:150]}] Deliberação:"
+    for tentativa in range(3):
+        try:
+            resp = model.generate_content(prompt)
+            texto = resp.text.strip() if resp and resp.text else ""
+            if not texto:
+                raise ValueError("Resposta vazia")
+            if "Deliberação:" not in texto:
+                texto += " Deliberação:"
+            return texto
+        except Exception as e:
+            erro = str(e)
+            if "429" in erro or "ResourceExhausted" in erro or "quota" in erro.lower():
+                espera = 15 * (tentativa + 1)
+                time.sleep(espera)
+                continue
+            return f"[ERRO IA: {type(e).__name__}: {erro[:150]}] Deliberação:"
+    return "[ERRO IA: Quota excedida após 3 tentativas] Deliberação:"
 
 
 
@@ -480,6 +495,7 @@ def gerar_docx(df, model, data_reuniao, participantes, progress_cb=None):
             })
             processados.update(ids_v)
             casos_feitos += len(ids_v)
+            time.sleep(2)
             if progress_cb:
                 progress_cb(casos_feitos / total_casos, f"Agrupando {len(ids_v)} casos semelhantes...")
 
@@ -490,6 +506,7 @@ def gerar_docx(df, model, data_reuniao, participantes, progress_cb=None):
             linhas.append({"id": caso["id_caso"], "desc": caso["titulo"][:90], "resumo": resumo})
             processados.add(caso["id_caso"])
             casos_feitos += 1
+            time.sleep(2)
             if progress_cb:
                 progress_cb(casos_feitos / total_casos, f"Resumindo {caso['id_caso']}...")
 
