@@ -30,89 +30,98 @@ def extrair_texto_pdf(uploaded_file):
                 texto_completo.append(t)
     return "\n".join(texto_completo)
 
-def parsear_pdf(texto_pdf):
+def parsear_pdf(uploaded_file):
     """
-    Parseia o texto extraído do PDF do Novajus e retorna DataFrame
-    com mesma estrutura que carregar_excel().
+    Lê o PDF do Novajus via tabelas (pdfplumber).
+    Layout da tabela:
+      Cabeçalho: col[2]=campo, col[6]=valor
+      Pasta:     col[1]='Pasta', col[2]='Proc - XXXX'
+      Andamento: col[3]=data, col[5]=tipo, col[10]=descricao
     """
-    import re
+    import pdfplumber, re
+
+    CAMPOS = {
+        'Número CNJ':            'cnj',
+        'Ação':                  'acao',
+        'Natureza':              'natureza',
+        'Data da distribuição':  'data_distribuicao',
+        'Valor da causa':        'valor',
+        'Status':                'status',
+        'Escritório responsável':'escritorio',
+        'Cliente principal':     'cliente',
+        'Contrário principal':   'contrario',
+        'Órgão':                 'orgao',
+    }
+
+    def cel(row, i):
+        return (row[i] or '').strip() if i < len(row) else ''
+
     casos = []
-    
-    # Divide o texto por blocos de "Pasta"
-    blocos = re.split(r'(?=\nPasta\s+Proc\s*-\s*\d+)', "\n" + texto_pdf)
-    
-    for bloco in blocos:
-        if not bloco.strip():
-            continue
-        
-        def extrair(campo, texto):
-            m = re.search(rf'{campo}\s+(.+?)(?:\n|$)', texto)
-            return m.group(1).strip() if m else ''
-        
-        pasta_m = re.search(r'Pasta\s+(Proc\s*-\s*\d+)', bloco)
-        if not pasta_m:
-            continue
-        
-        pasta_id = pasta_m.group(1).replace(' ', '')
-        
-        # Campos estruturados do cabeçalho
-        acao           = extrair('Ação', bloco)
-        natureza       = extrair('Natureza', bloco)
-        data_dist      = extrair('Data da distribuição', bloco)
-        valor_causa    = extrair('Valor da causa', bloco)
-        escritorio     = extrair('Escritório responsável', bloco)
-        cliente        = extrair('Cliente principal', bloco)
-        contrario      = extrair('Contrário principal', bloco)
-        orgao          = extrair('Órgão', bloco)
-        
-        # Inferir departamento pelo escritório responsável
-        esc_lower = escritorio.lower()
-        if 'trabalhista' in esc_lower:
-            dept = 'Trabalhista'
-        elif 'público' in esc_lower or 'publico' in esc_lower or 'direito público' in esc_lower:
-            dept = 'Público'
-        elif 'cível' in esc_lower or 'civel' in esc_lower or 'conflitos' in esc_lower:
-            dept = 'Cível'
-        elif 'privado' in esc_lower:
-            dept = 'Privado'
-        elif 'compliance' in esc_lower:
-            dept = 'Compliance'
-        else:
-            dept = inferir_dept(acao, orgao)
-        
-        # Extrai andamentos — linhas após o cabeçalho
-        # Andamentos têm padrão: data hora Andamento TEXTO
-        andamentos = re.findall(
-            r'(\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}\s+Andamento\s+(.+?)(?=\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}|Pasta\s+Proc|$)',
-            bloco, re.DOTALL
-        )
-        
-        historico_linhas = []
-        ultimo = ''
-        for data_and, descricao in andamentos:
-            desc_limpa = ' '.join(descricao.split())  # normaliza espaços
-            historico_linhas.append(f"[{data_and}] {desc_limpa}")
-            ultimo = desc_limpa
-        
-        historico = "\n".join(historico_linhas)
-        
-        # Título para exibição
-        titulo = f"{acao} — {cliente[:40]} x {contrario[:40]}" if contrario else f"{acao} — {cliente[:60]}"
-        
+    caso  = None
+
+    def salvar():
+        if not caso or not caso.get('acao'):
+            return
+        ands     = caso.get('_ands', [])
+        historico = '
+'.join(f"[{a['data']}] {a['desc']}" for a in ands)
+        ultimo    = ands[0]['desc'] if ands else ''
+
+        esc = caso.get('escritorio', '').lower()
+        if 'trabalhista' in esc:                    dept = 'Trabalhista'
+        elif 'público' in esc or 'publico' in esc:  dept = 'Público'
+        elif 'cível' in esc or 'conflitos' in esc:  dept = 'Cível'
+        elif 'privado' in esc:                      dept = 'Privado'
+        elif 'compliance' in esc:                   dept = 'Compliance'
+        else:                                       dept = 'Cível'
+
+        cliente   = caso.get('cliente','').replace('(filial cliente principal)','').strip()
+        contrario = caso.get('contrario','')
+
         casos.append({
-            'id_caso':            pasta_id,
-            'titulo':             titulo,
-            'dept':               dept,
-            'acao':               acao,
-            'partes':             f"{cliente} x {contrario}",
-            'orgao':              orgao,
-            'valor':              valor_causa,
-            'historico':          historico,
-            'ultimo':             ultimo,
-            'n_and':              len(andamentos),
-            'data_distribuicao':  data_dist,
+            'id_caso':           caso['_pasta'],
+            'titulo':            f"{caso.get('acao','')} — {cliente[:40]} x {contrario[:40]}",
+            'dept':              dept,
+            'acao':              caso.get('acao',''),
+            'partes':            f"{cliente} x {contrario}",
+            'orgao':             caso.get('orgao',''),
+            'valor':             caso.get('valor',''),
+            'historico':         historico,
+            'ultimo':            ultimo,
+            'n_and':             len(ands),
+            'data_distribuicao': caso.get('data_distribuicao',''),
         })
-    
+
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            for tab in page.extract_tables():
+                for row in tab:
+                    # Nova pasta
+                    if cel(row,1) == 'Pasta' and cel(row,2).startswith('Proc'):
+                        salvar()
+                        caso = {'_pasta': cel(row,2).replace(' ',''), '_ands': []}
+                        continue
+
+                    if caso is None:
+                        continue
+
+                    # Campo do cabeçalho
+                    campo = cel(row,2)
+                    if campo in CAMPOS:
+                        caso[CAMPOS[campo]] = cel(row,6)
+                        continue
+
+                    # Andamento
+                    data_c = cel(row,3)
+                    tipo_c = cel(row,5)
+                    desc_c = cel(row,10)
+                    if re.match(r'\d{2}/\d{2}/\d{4}', data_c) and 'Andamento' in tipo_c and desc_c:
+                        caso['_ands'].append({
+                            'data': data_c,
+                            'desc': ' '.join(desc_c.split())
+                        })
+
+    salvar()
     return pd.DataFrame(casos)
 DATA_CORTE      = pd.Timestamp("2026-12-31")
 
@@ -259,79 +268,95 @@ def get_model():
     if not key:
         return None
     genai.configure(api_key=key)
-    return genai.GenerativeModel("gemini-1.5-flash")
+    return genai.GenerativeModel("gemini-2.0-flash")
 
 def resumir_caso(model, caso):
-    data_dist = caso.get("data_distribuicao", "")
-    data_dist_txt = f"Data de distribuição: {data_dist}" if data_dist and data_dist not in ("", "nan", "NaT") else ""
-    prompt = f"""Você é assessor jurídico redigindo uma ata de atendimento mensal para um escritório de advocacia.
+    if model is None:
+        return "[ERRO: Chave Gemini não configurada]"
 
-Redija um resumo em UM ÚNICO PARÁGRAFO de até 80 palavras para o caso abaixo.
+    data_dist = str(caso.get("data_distribuicao", "") or "")
+    data_dist_txt = f"Distribuído em: {data_dist}" if data_dist and data_dist not in ("", "nan", "NaT", "None") else ""
 
-ESTRUTURA OBRIGATÓRIA DO PARÁGRAFO:
-1. "O caso se refere a [tipo de ação, cliente principal e parte contrária principal]."
-2. {data_dist_txt if data_dist_txt else ""}
-3. "Atualmente verificamos que [status atual claro e objetivo do caso]."
-4. "Deliberação: [deixar em branco]"
+    historico_bruto = str(caso.get("historico", "") or "")
+    historico_limpo = limpar_historico(historico_bruto) if historico_bruto.strip() else ""
+    if not historico_limpo.strip():
+        ultimo = str(caso.get("ultimo", "") or "")
+        historico_limpo = f"Último andamento registrado: {ultimo}" if ultimo else "Sem andamentos registrados."
 
-REGRAS:
-- Todo o texto deve estar em português formal — traduza qualquer trecho em inglês
-- Escreva exclusivamente em prosa corrida — NUNCA use tópicos, bullets, listas ou travessões
-- Máximo 80 palavras no total
-- Inclua a data de distribuição se disponível
-- NÃO repita o número da pasta no texto
-- IGNORE e-mails, links, textos de controle interno — use apenas fatos jurídicos
-- Use exclusivamente os dados fornecidos abaixo
+    prompt = (
+        "Você é assessor jurídico do escritório Barbur Carneiro Advogados (BCA) "
+        "redigindo uma ata de atendimento mensal ao cliente.\n\n"
+        "Redija UM ÚNICO PARÁGRAFO em português formal de no máximo 100 palavras sobre o caso abaixo.\n\n"
+        "O parágrafo deve obrigatoriamente:\n"
+        "1. Identificar o tipo de ação e as partes envolvidas\n"
+        "2. Mencionar a data de distribuição (se disponível)\n"
+        "3. Descrever o status ATUAL com base no andamento mais recente (primeiro da lista)\n"
+        "4. Mencionar os andamentos relevantes dos últimos meses de forma resumida\n"
+        "5. Terminar com a palavra 'Deliberação:'\n\n"
+        "REGRAS ABSOLUTAS:\n"
+        "- Escreva SOMENTE em português formal — traduza tudo que estiver em inglês\n"
+        "- NUNCA use bullet points, listas ou tópicos — apenas prosa corrida\n"
+        "- Seja específico: mencione decisões, valores, prazos quando relevantes\n"
+        "- NÃO escreva 'aguarda novos andamentos' se houver andamentos concretos\n\n"
+        f"DADOS DO CASO:\n"
+        f"Ação: {caso.get('acao','')}\n"
+        f"Partes: {caso.get('partes','')}\n"
+        f"Órgão: {caso.get('orgao','')}\n"
+        f"Valor da causa: {caso.get('valor','')}\n"
+        f"{data_dist_txt}\n\n"
+        f"ANDAMENTOS (do mais recente ao mais antigo):\n{historico_limpo}"
+    )
 
-DADOS DO CASO:
-Pasta: {caso['id_caso']}
-Tipo de ação: {caso['acao']}
-Partes: {caso['partes']}
-Órgão: {caso['orgao']}
-Valor da causa: {caso['valor']}
-{data_dist_txt}
-Histórico de andamentos:
-{limpar_historico(caso['historico'])}"""
     try:
-        return model.generate_content(prompt).text.strip()
+        resp = model.generate_content(prompt)
+        texto = resp.text.strip() if resp and resp.text else ""
+        if not texto:
+            raise ValueError("Resposta vazia da IA")
+        if "Deliberação:" not in texto:
+            texto += " Deliberação:"
+        return texto
     except Exception as e:
-        return f"O caso se refere a {caso['acao']}, envolvendo {caso['partes'][:80]}. Atualmente verificamos que o processo segue em andamento, aguardando novos movimentos. Deliberação:"
+        return f"[ERRO IA: {type(e).__name__}: {str(e)[:150]}] Ação: {caso.get('acao','')}. Partes: {caso.get('partes','')[:80]}. Deliberação:"
+
 
 def resumir_grupo(model, ids, df):
+    if model is None:
+        return "[ERRO: Chave Gemini não configurada]"
+
     rows = df[df["id_caso"].isin(ids)]
-    casos_txt = "\n".join(
-        f"- Pasta {r['id_caso']} | {r['partes'][:60]} | Dist.: {r.get('data_distribuicao','')} | Último andamento: {limpar_historico(r['ultimo'])[:150]}"
-        for _, r in rows.iterrows()
+    acao_tipo = rows.iloc[0].get("acao", "") if len(rows) > 0 else ""
+
+    casos_txt = ""
+    for _, r in rows.iterrows():
+        hist = limpar_historico(str(r.get("historico", "") or ""))
+        ultimos = "\n  ".join(hist.split("\n")[:3]) if hist.strip() else str(r.get("ultimo", "") or "")
+        casos_txt += f"\nPasta {r['id_caso']} | {str(r.get('partes',''))[:80]}\n  Andamentos recentes:\n  {ultimos}\n"
+
+    prompt = (
+        "Você é assessor jurídico do escritório Barbur Carneiro Advogados (BCA).\n\n"
+        f"Os {len(ids)} casos abaixo são da mesma natureza ({acao_tipo}).\n"
+        "Redija UM ÚNICO PARÁGRAFO em português formal (máximo 120 palavras) agrupando os casos.\n\n"
+        "O parágrafo deve:\n"
+        "1. Indicar quantas e quais pastas compõem o grupo\n"
+        "2. Descrever a situação atual com base nos andamentos mais recentes\n"
+        "3. Mencionar o que há de comum e o que difere entre os casos\n"
+        "4. Terminar com 'Deliberação:'\n\n"
+        "REGRAS: português formal, prosa corrida, sem bullets, traduza inglês, seja específico.\n\n"
+        f"CASOS:\n{casos_txt}"
     )
-    prompt = f"""Você é assessor jurídico redigindo uma ata de atendimento mensal.
 
-Os casos abaixo são semelhantes (mesma matéria/tese). Redija um bloco agrupado seguindo este formato:
-
-FORMATO OBRIGATÓRIO:
-Título do Grupo: [Números das pastas] — [título que identifique os casos, ex: "Ações PROCON — Auto Posto Emanoel"]
-
-Em seguida, UM PARÁGRAFO de até 100 palavras com:
-- "O grupo se refere a [tipo de ação e tese comum]."
-- "Atualmente verificamos que [status comum a todos os casos]. [Diferenças relevantes entre eles, se houver]."
-- "Deliberação: [deixar em branco]"
-
-REGRAS:
-- Todo o texto deve estar em português formal — traduza qualquer trecho em inglês
-- Escreva exclusivamente em prosa corrida — NUNCA use tópicos, bullets, listas ou travessões
-- NÃO repita informações idênticas caso a caso
-- Identifique quantas pastas compõem o grupo
-- IGNORE e-mails, links, textos de controle interno — use apenas fatos jurídicos
-- Use exclusivamente os dados fornecidos
-
-CASOS DO GRUPO:
-Tipo de ação: {rows.iloc[0]['acao']}
-Total de casos: {len(ids)}
-{casos_txt}"""
     try:
-        return model.generate_content(prompt).text.strip()
-    except:
-        pastas = ", ".join(ids)
-        return f"O grupo de {len(ids)} processos (pastas: {pastas}) refere-se a {rows.iloc[0]['acao']}. Atualmente verificamos que os casos seguem em andamento, aguardando movimentações. Deliberação:"
+        resp = model.generate_content(prompt)
+        texto = resp.text.strip() if resp and resp.text else ""
+        if not texto:
+            raise ValueError("Resposta vazia")
+        if "Deliberação:" not in texto:
+            texto += " Deliberação:"
+        return texto
+    except Exception as e:
+        return f"[ERRO IA: {type(e).__name__}: {str(e)[:150]}] Deliberação:"
+
+
 
 # ─────────────────────────────────────────────────────────────
 # GERAÇÃO DO WORD
@@ -718,8 +743,7 @@ if gerar and arquivo_principal:
     try:
         with st.spinner("Lendo arquivo..."):
             if usar_pdf:
-                texto = extrair_texto_pdf(arquivo_principal)
-                df_total = parsear_pdf(texto)
+                df_total = parsear_pdf(arquivo_principal)
             else:
                 df1 = carregar_excel(arquivo_principal)
                 dfs = [df1]
@@ -752,6 +776,10 @@ if gerar and arquivo_principal:
         prog_text = st.empty()
 
         model = get_model()
+
+        if model is None:
+            st.error("❌ Chave Gemini não configurada. Vá em Settings > Secrets no Streamlit Cloud e adicione: GEMINI_API_KEY = \"sua_chave\"")
+            st.stop()
 
         def atualizar_progresso(pct, msg):
             prog_bar.progress(min(pct, 1.0))
