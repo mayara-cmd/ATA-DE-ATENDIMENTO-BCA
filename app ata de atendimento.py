@@ -124,14 +124,42 @@ def detectar_grupos(df_area):
     df2["_k"] = df2.apply(chave, axis=1)
     return [list(g["id_caso"]) for _, g in df2.groupby("_k") if len(g) >= 2]
 
+def limpar_historico(historico):
+    """Remove lixo do histórico: e-mails, links, textos de controle interno."""
+    linhas = historico.split("\n")
+    limpas = []
+    pular = False
+    for linha in linhas:
+        l = linha.strip()
+        if not l:
+            pular = False
+            continue
+        # Ignorar linhas que são claramente lixo
+        if any(p in l for p in [
+            "http://", "https://", "TÍTULO DO E-MAIL:", "Resumir este e-mail",
+            "Subject:", "To:", "Date:", "From:", "De:", "Para:", "Cc:",
+            "RENOVAÇÃO ACOMPANHAMENTO", "RETIRADO DO ACOMPANHAMENTO",
+            "Movimentado por:", "@", "Login:", "Senha:", "UC:",
+        ]):
+            pular = True
+            continue
+        if pular and (l.startswith(">") or len(l) < 10):
+            continue
+        pular = False
+        limpas.append(l)
+    return "\n".join(limpas[-40:])  # últimos 40 andamentos limpos
+
 # ─────────────────────────────────────────────────────────────
 # IA — GEMINI
 # ─────────────────────────────────────────────────────────────
-GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-
-@st.cache_resource
 def get_model():
-    genai.configure(api_key=GEMINI_API_KEY)
+    try:
+        key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        key = ""
+    if not key:
+        return None
+    genai.configure(api_key=key)
     return genai.GenerativeModel("gemini-1.5-flash")
 
 def resumir_caso(model, caso):
@@ -148,11 +176,12 @@ ESTRUTURA OBRIGATÓRIA DO PARÁGRAFO:
 4. "Deliberação: [deixar em branco]"
 
 REGRAS:
-- Linguagem formal, direta e simples
+- Todo o texto deve estar em português formal — traduza qualquer trecho em inglês
+- Escreva exclusivamente em prosa corrida — NUNCA use tópicos, bullets, listas ou travessões
 - Máximo 80 palavras no total
 - Inclua a data de distribuição se disponível
 - NÃO repita o número da pasta no texto
-- NÃO use bullet points — escreva em parágrafo corrido
+- IGNORE e-mails, links, textos de controle interno — use apenas fatos jurídicos
 - Use exclusivamente os dados fornecidos abaixo
 
 DADOS DO CASO:
@@ -163,16 +192,16 @@ Partes: {caso['partes']}
 Valor da causa: {caso['valor']}
 {data_dist_txt}
 Histórico de andamentos:
-{caso['historico'][-2500:]}"""
+{limpar_historico(caso['historico'])}"""
     try:
         return model.generate_content(prompt).text.strip()
     except Exception as e:
-        return f"O caso se refere a {caso['acao']} — {caso['partes'][:100]}. Atualmente verificamos que {caso['ultimo'][:200]}. Deliberação:"
+        return f"O caso se refere a {caso['acao']}, envolvendo {caso['partes'][:80]}. Atualmente verificamos que o processo segue em andamento, aguardando novos movimentos. Deliberação:"
 
 def resumir_grupo(model, ids, df):
     rows = df[df["id_caso"].isin(ids)]
     casos_txt = "\n".join(
-        f"- Pasta {r['id_caso']} | {r['partes'][:60]} | Dist.: {r.get('data_distribuicao','')} | Último andamento: {r['ultimo'][:150]}"
+        f"- Pasta {r['id_caso']} | {r['partes'][:60]} | Dist.: {r.get('data_distribuicao','')} | Último andamento: {limpar_historico(r['ultimo'])[:150]}"
         for _, r in rows.iterrows()
     )
     prompt = f"""Você é assessor jurídico redigindo uma ata de atendimento mensal.
@@ -188,9 +217,11 @@ Em seguida, UM PARÁGRAFO de até 100 palavras com:
 - "Deliberação: [deixar em branco]"
 
 REGRAS:
+- Todo o texto deve estar em português formal — traduza qualquer trecho em inglês
+- Escreva exclusivamente em prosa corrida — NUNCA use tópicos, bullets, listas ou travessões
 - NÃO repita informações idênticas caso a caso
-- Linguagem formal, direta e simples
 - Identifique quantas pastas compõem o grupo
+- IGNORE e-mails, links, textos de controle interno — use apenas fatos jurídicos
 - Use exclusivamente os dados fornecidos
 
 CASOS DO GRUPO:
@@ -201,7 +232,7 @@ Total de casos: {len(ids)}
         return model.generate_content(prompt).text.strip()
     except:
         pastas = ", ".join(ids)
-        return f"Grupo ({len(ids)} casos — {pastas}): O grupo se refere a {rows.iloc[0]['acao']}. Atualmente verificamos que {rows.iloc[0]['ultimo'][:200]}. Deliberação:"
+        return f"O grupo de {len(ids)} processos (pastas: {pastas}) refere-se a {rows.iloc[0]['acao']}. Atualmente verificamos que os casos seguem em andamento, aguardando movimentações. Deliberação:"
 
 # ─────────────────────────────────────────────────────────────
 # GERAÇÃO DO WORD
