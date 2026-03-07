@@ -145,8 +145,8 @@ MAPA_ACAO_DEPT = {
     "falência":                            "Cível",
 }
 
-COR_TITULO = RGBColor(0x1A, 0x1A, 0x1A)
-COR_SUBTIT = RGBColor(0x44, 0x44, 0x44)
+COR_TITULO = RGBColor(0x00, 0x00, 0x00)
+COR_SUBTIT = RGBColor(0x00, 0x00, 0x00)
 
 # ─────────────────────────────────────────────────────────────
 # PROCESSAMENTO DO EXCEL
@@ -503,6 +503,7 @@ def _resumo_para(paragraph, texto):
         run = paragraph.add_run(parte[2:-2] if parte.startswith("**") else parte)
         run.bold = parte.startswith("**")
         run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
 
 def _subtitulo(doc, texto):
     p = doc.add_paragraph()
@@ -527,7 +528,7 @@ def tabela_casos(doc, linhas):
         p0 = row[0].paragraphs[0]
         r1 = p0.add_run(ln["id"] + "\n"); r1.bold = True; r1.font.size = Pt(9)
         r2 = p0.add_run(ln.get("desc", "")[:90])
-        r2.font.size = Pt(8); r2.font.color.rgb = RGBColor(0x60, 0x60, 0x60)
+        r2.font.size = Pt(8); r2.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
         _resumo_para(row[1].paragraphs[0], ln.get("resumo", ""))
         row[2].paragraphs[0].add_run("").font.size = Pt(9)
     for row in t.rows:
@@ -608,7 +609,10 @@ def gerar_docx(df, model, data_reuniao, participantes, progress_cb=None):
         for _, caso in df_area.iterrows():
             if caso["id_caso"] in processados:
                 continue
-            resumo = resumir_caso(model, caso)
+            try:
+                resumo = resumir_caso(model, caso)
+            except Exception as e_caso:
+                resumo = f"[Erro ao resumir: {type(e_caso).__name__}: {str(e_caso)[:100]}] Deliberação:"
             linhas.append({"id": caso["id_caso"], "desc": caso["titulo"][:90], "resumo": resumo})
             processados.add(caso["id_caso"])
             casos_feitos += 1
@@ -907,7 +911,14 @@ if gerar and arquivo_principal:
             prog_bar.progress(min(pct, 1.0))
             prog_text.caption(f"✍ {msg}")
 
-        docx_buf = gerar_docx(df_total, model, data_reuniao, participantes, atualizar_progresso)
+        try:
+            docx_buf = gerar_docx(df_total, model, data_reuniao, participantes, atualizar_progresso)
+        except Exception as e_docx:
+            prog_bar.progress(1.0)
+            prog_text.empty()
+            st.error(f"❌ Erro ao gerar o Word: {type(e_docx).__name__}: {e_docx}")
+            st.exception(e_docx)
+            st.stop()
 
         prog_bar.progress(1.0)
         prog_text.empty()
@@ -931,5 +942,5 @@ if gerar and arquivo_principal:
         st.info("💡 Após baixar, preencha manualmente no Word: **Casos encerrados** e **Outras deliberações**.")
 
     except Exception as e:
-        st.error(f"❌ Erro ao processar: {e}")
+        st.error(f"❌ Erro ao processar: {type(e).__name__}: {e}")
         st.exception(e)
