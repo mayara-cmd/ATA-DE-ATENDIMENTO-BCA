@@ -270,9 +270,104 @@ def get_model():
     genai.configure(api_key=key)
     return genai.GenerativeModel("gemini-2.0-flash")
 
+
+# ─────────────────────────────────────────────────────────────
+# PSEUDONIMIZAÇÃO — nomes reais nunca chegam à API do Gemini
+# ─────────────────────────────────────────────────────────────
+import hashlib
+
+def pseudonimizar(caso: dict) -> tuple[dict, dict]:
+    """
+    Substitui nomes de pessoas e empresas por rótulos genéricos
+    antes de enviar qualquer dado à API do Gemini.
+
+    Retorna:
+        caso_mascarado  — cópia do caso com nomes substituídos
+        mapa_reverso    — {rótulo: nome_real} para uso interno (não enviado à API)
+
+    Estratégia:
+        - Pessoas físicas  → PESSOA_A, PESSOA_B ...
+        - Empresas/órgãos  → EMPRESA_A, EMPRESA_B ...
+        - Escritório BCA   → sempre omitido (não é dado sensível do cliente)
+    """
+    import re, copy
+
+    caso_m = copy.deepcopy(caso)
+    mapa   = {}          # nome_real → rótulo
+    reverso = {}         # rótulo   → nome_real
+    contadores = {"PESSOA": 0, "EMPRESA": 0}
+
+    # Letras do alfabeto para rótulos (A-Z, depois AA, AB...)
+    def proximo_rotulo(tipo):
+        n = contadores[tipo]
+        contadores[tipo] += 1
+        letras = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        if n < 26:
+            return f"{tipo}_{letras[n]}"
+        return f"{tipo}_{letras[n//26-1]}{letras[n%26]}"
+
+    def rotular(nome: str) -> str:
+        nome = nome.strip()
+        if not nome or len(nome) < 4:
+            return nome
+        if nome in mapa:
+            return mapa[nome]
+        # Heurística: empresas têm LTDA, S/A, MINISTÉRIO, UNIÃO, FAZENDA, etc.
+        palavras_empresa = ["LTDA", "S/A", "SA", "EIRELI", "ME ", "EPP",
+                            "MINISTÉRIO", "UNIÃO", "FAZENDA", "RECEITA",
+                            "SECRETARIA", "TRIBUNAL", "PREFEITURA", "ESTADO",
+                            "MUNICÍPIO", "FEDERAL", "CORP", "INC", "LLC",
+                            "ADVOCACIA", "PROCURADORIA", "MINISTÉRIO PÚBLICO"]
+        nome_upper = nome.upper()
+        tipo = "EMPRESA" if any(p in nome_upper for p in palavras_empresa) else "PESSOA"
+        rotulo = proximo_rotulo(tipo)
+        mapa[nome] = rotulo
+        reverso[rotulo] = nome
+        return rotulo
+
+    # Campos a pseudonimizar
+    campos_texto = ["partes", "historico", "ultimo", "titulo"]
+    campos_simples = ["orgao"]  # órgão público — pseudonimizar só se privado
+
+    # Extrai nomes das partes (campo mais estruturado)
+    partes_raw = str(caso_m.get("partes", ""))
+    nomes_partes = [p.strip() for p in partes_raw.split(" x ") if p.strip()]
+    for nome in nomes_partes:
+        rotular(nome)  # pré-registra para consistência no historico
+
+    # Aplica substituição em todos os campos de texto
+    def substituir_em_texto(texto: str) -> str:
+        for nome_real, rotulo in sorted(mapa.items(), key=lambda x: -len(x[0])):
+            # Case-insensitive replace
+            texto = re.sub(re.escape(nome_real), rotulo, texto, flags=re.IGNORECASE)
+        return texto
+
+    for campo in campos_texto:
+        if campo in caso_m and caso_m[campo]:
+            caso_m[campo] = substituir_em_texto(str(caso_m[campo]))
+
+    # Órgão: pseudonimiza apenas se não for tribunal/órgão público
+    orgao = str(caso_m.get("orgao", ""))
+    orgao_upper = orgao.upper()
+    orgaos_publicos = ["TRIBUNAL", "VARA", "TRT", "TRF", "STJ", "STF",
+                       "CARF", "MINISTÉRIO", "PROCURADORIA", "CÂMARA"]
+    if orgao and not any(p in orgao_upper for p in orgaos_publicos):
+        caso_m["orgao"] = rotular(orgao)
+
+    # Garante que o campo 'partes' use os rótulos já mapeados
+    if nomes_partes:
+        caso_m["partes"] = " x ".join(rotular(n) for n in nomes_partes)
+
+    return caso_m, reverso
+
+
 def resumir_caso(model, caso):
     if model is None:
         return "[ERRO: Chave Gemini não configurada]"
+
+    # Pseudonimiza antes de qualquer envio à API
+    caso_original = caso.copy()
+    caso, mapa_reverso = pseudonimizar(caso)
 
     data_dist = str(caso.get("data_distribuicao", "") or "")
     data_dist_txt = f"Distribuído em: {data_dist}" if data_dist and data_dist not in ("", "nan", "NaT", "None") else ""
@@ -315,6 +410,10 @@ def resumir_caso(model, caso):
                 raise ValueError("Resposta vazia da IA")
             if "Deliberação:" not in texto:
                 texto += " Deliberação:"
+            # Restaura nomes reais antes de retornar
+            import re as _re
+            for rotulo, nome_real in sorted(mapa_reverso.items(), key=lambda x: -len(x[0])):
+                texto = _re.sub(_re.escape(rotulo), nome_real, texto, flags=_re.IGNORECASE)
             return texto
         except Exception as e:
             erro = str(e)
@@ -322,8 +421,8 @@ def resumir_caso(model, caso):
                 espera = 15 * (tentativa + 1)
                 time.sleep(espera)
                 continue
-            return f"[ERRO IA: {type(e).__name__}: {erro[:150]}] Ação: {caso.get('acao','')}. Partes: {caso.get('partes','')[:80]}. Deliberação:"
-    return f"[ERRO IA: Quota excedida após 3 tentativas] Ação: {caso.get('acao','')}. Deliberação:"
+            return f"[ERRO IA: {type(e).__name__}: {erro[:150]}] Ação: {caso_original.get('acao','')}. Partes: {caso_original.get('partes','')[:80]}. Deliberação:"
+    return f"[ERRO IA: Quota excedida após 3 tentativas] Ação: {caso_original.get('acao','')}. Deliberação:"
 
 
 def resumir_grupo(model, ids, df):
@@ -334,10 +433,13 @@ def resumir_grupo(model, ids, df):
     acao_tipo = rows.iloc[0].get("acao", "") if len(rows) > 0 else ""
 
     casos_txt = ""
+    mapa_reverso_grupo = {}
     for _, r in rows.iterrows():
-        hist = limpar_historico(str(r.get("historico", "") or ""))
-        ultimos = "\n  ".join(hist.split("\n")[:3]) if hist.strip() else str(r.get("ultimo", "") or "")
-        casos_txt += f"\nPasta {r['id_caso']} | {str(r.get('partes',''))[:80]}\n  Andamentos recentes:\n  {ultimos}\n"
+        r_mask, mapa_r = pseudonimizar(r.to_dict())
+        mapa_reverso_grupo.update(mapa_r)
+        hist = limpar_historico(str(r_mask.get("historico", "") or ""))
+        ultimos = "\n  ".join(hist.split("\n")[:3]) if hist.strip() else str(r_mask.get("ultimo", "") or "")
+        casos_txt += f"\nPasta {r['id_caso']} | {str(r_mask.get('partes',''))[:80]}\n  Andamentos recentes:\n  {ultimos}\n"
 
     prompt = (
         "Você é assessor jurídico do escritório Barbur Carneiro Advogados (BCA).\n\n"
@@ -360,6 +462,10 @@ def resumir_grupo(model, ids, df):
                 raise ValueError("Resposta vazia")
             if "Deliberação:" not in texto:
                 texto += " Deliberação:"
+            # Restaura nomes reais antes de retornar
+            import re as _re
+            for rotulo, nome_real in sorted(mapa_reverso_grupo.items(), key=lambda x: -len(x[0])):
+                texto = _re.sub(_re.escape(rotulo), nome_real, texto, flags=_re.IGNORECASE)
             return texto
         except Exception as e:
             erro = str(e)
